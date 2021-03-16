@@ -29,6 +29,11 @@ options:
       - The name of the job command. This must be 'glueetl'.
     default: glueetl
     type: str
+  command_python_version:
+    description:
+      - Python version being used to execute a Python shell job. Allowed values are '2' or '3'.
+    default: 2
+    type: str
   command_script_location:
     description:
       - The S3 path to a script that executes a job.
@@ -47,6 +52,12 @@ options:
   description:
     description:
       - Description of the job being defined.
+    type: str
+  glue_version:
+    description:
+      - AWS Glue version. This determines the available version of Apache Scala and Python as described here
+        U(https://docs.aws.amazon.com/glue/latest/dg/add-job.html).
+    default: 0.9
     type: str
   max_concurrent_runs:
     description:
@@ -139,6 +150,11 @@ command:
             returned: when state is present
             type: str
             sample: mybucket/myscript.py
+        python_version:
+            description: Specifies the Python version.
+            returned: when state is present
+            type: str
+            sample: 3
 connections:
     description: The connections used for this job.
     returned: when state is present
@@ -159,6 +175,11 @@ description:
     returned: when state is present
     type: str
     sample: My first Glue job
+glue_version:
+    description: Glue version.
+    returned: when state is present
+    type: str
+    sample: 2.0
 job_name:
     description: The name of the AWS Glue job.
     returned: always
@@ -253,8 +274,11 @@ def _compare_glue_job_params(user_params, current_params):
 
     if 'AllocatedCapacity' in user_params and user_params['AllocatedCapacity'] != current_params['AllocatedCapacity']:
         return True
-    if 'Command' in user_params and user_params['Command']['ScriptLocation'] != current_params['Command']['ScriptLocation']:
-        return True
+    if 'Command' in user_params:
+        if user_params['Command']['ScriptLocation'] != current_params['Command']['ScriptLocation']:
+            return True
+        if user_params['Command']['PythonVersion'] != current_params['Command']['PythonVersion']:
+            return True
     if 'Connections' in user_params and set(user_params['Connections']) != set(current_params['Connections']):
         return True
     if 'DefaultArguments' in user_params and set(user_params['DefaultArguments']) != set(current_params['DefaultArguments']):
@@ -262,6 +286,8 @@ def _compare_glue_job_params(user_params, current_params):
     if 'Description' in user_params and user_params['Description'] != current_params['Description']:
         return True
     if 'ExecutionProperty' in user_params and user_params['ExecutionProperty']['MaxConcurrentRuns'] != current_params['ExecutionProperty']['MaxConcurrentRuns']:
+        return True
+    if 'GlueVersion' in user_params and user_params['GlueVersion'] != current_params['GlueVersion']:
         return True
     if 'MaxRetries' in user_params and user_params['MaxRetries'] != current_params['MaxRetries']:
         return True
@@ -295,12 +321,16 @@ def create_or_update_glue_job(connection, module, glue_job):
         params['AllocatedCapacity'] = module.params.get("allocated_capacity")
     if module.params.get("command_script_location") is not None:
         params['Command'] = {'Name': module.params.get("command_name"), 'ScriptLocation': module.params.get("command_script_location")}
+        if module.params.get("command_python_version") is not None:
+            params['Command']['PythonVersion'] = module.params.get("command_python_version")
     if module.params.get("connections") is not None:
         params['Connections'] = {'Connections': module.params.get("connections")}
     if module.params.get("default_arguments") is not None:
         params['DefaultArguments'] = module.params.get("default_arguments")
     if module.params.get("description") is not None:
         params['Description'] = module.params.get("description")
+    if module.params.get("glue_version") is not None:
+        params['GlueVersion'] = module.params.get("glue_version")
     if module.params.get("max_concurrent_runs") is not None:
         params['ExecutionProperty'] = {'MaxConcurrentRuns': module.params.get("max_concurrent_runs")}
     if module.params.get("max_retries") is not None:
@@ -321,13 +351,15 @@ def create_or_update_glue_job(connection, module, glue_job):
                 # Update job needs slightly modified params
                 update_params = {'JobName': params['Name'], 'JobUpdate': copy.deepcopy(params)}
                 del update_params['JobUpdate']['Name']
-                connection.update_job(**update_params)
+                if not module.check_mode:
+                    connection.update_job(**update_params)
                 changed = True
             except (botocore.exceptions.ClientError, botocore.exceptions.BotoCoreError) as e:
                 module.fail_json_aws(e)
     else:
         try:
-            connection.create_job(**params)
+            if not module.check_mode:
+                connection.create_job(**params)
             changed = True
         except (botocore.exceptions.ClientError, botocore.exceptions.BotoCoreError) as e:
             module.fail_json_aws(e)
@@ -353,7 +385,8 @@ def delete_glue_job(connection, module, glue_job):
 
     if glue_job:
         try:
-            connection.delete_job(JobName=glue_job['Name'])
+            if not module.check_mode:
+                connection.delete_job(JobName=glue_job['Name'])
             changed = True
         except (botocore.exceptions.ClientError, botocore.exceptions.BotoCoreError) as e:
             module.fail_json_aws(e)
@@ -367,10 +400,12 @@ def main():
         dict(
             allocated_capacity=dict(type='int'),
             command_name=dict(type='str', default='glueetl'),
+            command_python_version=dict(type='str', default='2'),
             command_script_location=dict(type='str'),
             connections=dict(type='list', elements='str'),
             default_arguments=dict(type='dict'),
             description=dict(type='str'),
+            glue_version=dict(type='str', default='0.9'),
             max_concurrent_runs=dict(type='int'),
             max_retries=dict(type='int'),
             name=dict(required=True, type='str'),
@@ -386,7 +421,8 @@ def main():
     module = AnsibleAWSModule(argument_spec=argument_spec,
                               required_if=[
                                   ('state', 'present', ['role', 'command_script_location'])
-                              ]
+                              ],
+                              supports_check_mode=True
                               )
 
     connection = module.client('glue')
